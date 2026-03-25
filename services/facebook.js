@@ -1,9 +1,7 @@
 const crypto = require("crypto");
 const axios = require("axios");
 
-const graphApiVersion = process.env.FB_GRAPH_API_VERSION || "v22.0";
-
-function verifyFacebookWebhook(query) {
+function verifyFacebookWebhook(query, verifyToken) {
   const mode = query["hub.mode"];
   const token = query["hub.verify_token"];
   const challenge = query["hub.challenge"];
@@ -12,7 +10,7 @@ function verifyFacebookWebhook(query) {
     return { ok: false, error: "invalid_mode" };
   }
 
-  if (!token || token !== process.env.FB_VERIFY_TOKEN) {
+  if (!token || token !== verifyToken) {
     return { ok: false, error: "invalid_verify_token" };
   }
 
@@ -23,8 +21,7 @@ function verifyFacebookWebhook(query) {
   return { ok: true, challenge };
 }
 
-function validateFacebookSignature(req) {
-  const appSecret = process.env.FB_APP_SECRET;
+function validateFacebookSignature(req, appSecret) {
   const signatureHeader = req.get("x-hub-signature-256");
 
   if (!appSecret || !signatureHeader) {
@@ -71,7 +68,7 @@ function extractLeadEvents(payload) {
   return events;
 }
 
-async function fetchLeadDetails(event) {
+async function fetchLeadDetails(event, clientConfig) {
   if (event.rawValue && event.rawValue.field_data) {
     return {
       ...event.rawValue,
@@ -83,14 +80,16 @@ async function fetchLeadDetails(event) {
     throw new Error("Missing leadgen_id in Facebook webhook event");
   }
 
-  if (!process.env.FB_ACCESS_TOKEN) {
+  if (!clientConfig?.meta?.accessToken) {
     throw new Error("FB_ACCESS_TOKEN is required to fetch lead details");
   }
 
+  const graphApiVersion =
+    clientConfig?.meta?.graphApiVersion || process.env.FB_GRAPH_API_VERSION || "v22.0";
   const url = `https://graph.facebook.com/${graphApiVersion}/${event.leadgenId}`;
   const response = await axios.get(url, {
     params: {
-      access_token: process.env.FB_ACCESS_TOKEN,
+      access_token: clientConfig.meta.accessToken,
       fields:
         "id,created_time,ad_id,form_id,field_data,campaign_name,ad_name,platform"
     },
@@ -100,7 +99,7 @@ async function fetchLeadDetails(event) {
   return response.data;
 }
 
-function parseLeadRecord(rawLead, event) {
+function parseLeadRecord(rawLead, event, clientConfig) {
   const fieldMap = {};
 
   for (const field of rawLead.field_data || []) {
@@ -114,15 +113,15 @@ function parseLeadRecord(rawLead, event) {
 
   const firstName = pickValue(
     fieldMap,
-    process.env.FIRST_NAME_FIELD_KEYS,
+    clientConfig.firstNameFieldKeys,
     inferFirstName(fieldMap)
   );
   const phoneNumber = pickValue(
     fieldMap,
-    process.env.PHONE_FIELD_KEYS,
+    clientConfig.phoneFieldKeys,
     rawLead.phone_number || ""
   );
-  const consentEvaluation = evaluateConsent(fieldMap, rawLead, event);
+  const consentEvaluation = evaluateConsent(fieldMap, rawLead, event, clientConfig);
 
   return {
     externalLeadId: rawLead.id || event.leadgenId || null,
@@ -156,6 +155,8 @@ function buildLeadTrackingRecord(parsedLead, event, overrides = {}) {
     formId: parsedLead.formId,
     formName: parsedLead.formName,
     pageId: parsedLead.pageId,
+    clientSlug: overrides.clientSlug || "default",
+    clientName: overrides.clientName || "Default Client",
     eventCreatedTime: event.createdTime,
     status: overrides.status || "received",
     failureReason: null,
@@ -167,13 +168,13 @@ function buildLeadTrackingRecord(parsedLead, event, overrides = {}) {
   };
 }
 
-function evaluateConsent(fieldMap, rawLead, event) {
-  const impliedConsentForms = parseCsv(
-    process.env.META_FORM_NAMES_WITH_IMPLIED_CONSENT
+function evaluateConsent(fieldMap, rawLead, event, clientConfig) {
+  const impliedConsentForms = (clientConfig.impliedConsentFormNames || []).map((item) =>
+    item.toLowerCase()
   );
-  const consentKeys = parseCsv(process.env.CONSENT_FIELD_KEYS);
+  const consentKeys = clientConfig.consentFieldKeys || [];
   const trueValues = new Set(
-    parseCsv(process.env.CONSENT_TRUE_VALUES).map((value) =>
+    (clientConfig.consentTrueValues || []).map((value) =>
       value.toLowerCase()
     )
   );
@@ -200,8 +201,7 @@ function evaluateConsent(fieldMap, rawLead, event) {
     };
   }
 
-  const requireExplicitConsent =
-    `${process.env.REQUIRE_EXPLICIT_CONSENT}` !== "false";
+  const requireExplicitConsent = clientConfig.requireExplicitConsent !== false;
 
   return {
     hasConsent: !requireExplicitConsent,
@@ -210,9 +210,10 @@ function evaluateConsent(fieldMap, rawLead, event) {
   };
 }
 
-function pickValue(fieldMap, csvKeys, fallback = "") {
-  for (const key of parseCsv(csvKeys)) {
-    const value = fieldMap[key];
+function pickValue(fieldMap, keys, fallback = "") {
+  for (const key of keys || []) {
+    const normalizedKey = String(key).trim().toLowerCase();
+    const value = fieldMap[normalizedKey];
     if (value) {
       return value;
     }
@@ -228,13 +229,6 @@ function inferFirstName(fieldMap) {
   }
 
   return fullName.trim().split(/\s+/)[0];
-}
-
-function parseCsv(value = "") {
-  return value
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
 }
 
 module.exports = {

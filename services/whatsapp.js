@@ -1,25 +1,24 @@
 const axios = require("axios");
 
-const apiVersion = process.env.WA_API_VERSION || "v22.0";
-
 async function sendTemplateMessage({
   to,
   firstName,
   groupInviteLink,
   offerName,
+  clientConfig,
   metadata = {}
 }) {
-  validateWhatsAppConfig();
+  validateWhatsAppConfig(clientConfig);
 
-  const url = `https://graph.facebook.com/${apiVersion}/${process.env.WA_PHONE_NUMBER_ID}/messages`;
+  const url = `https://graph.facebook.com/${clientConfig.whatsapp.apiVersion}/${clientConfig.whatsapp.phoneNumberId}/messages`;
   const payload = {
     messaging_product: "whatsapp",
     to,
     type: "template",
     template: {
-      name: process.env.WA_TEMPLATE_NAME,
+      name: clientConfig.whatsapp.templateName,
       language: {
-        code: process.env.WA_TEMPLATE_LANGUAGE_CODE || "en_US"
+        code: clientConfig.whatsapp.templateLanguageCode || "en_US"
       },
       components: [
         {
@@ -48,13 +47,13 @@ async function sendTemplateMessage({
       () =>
         axios.post(url, payload, {
           headers: {
-            Authorization: `Bearer ${process.env.WA_ACCESS_TOKEN}`,
+            Authorization: `Bearer ${clientConfig.whatsapp.accessToken}`,
             "Content-Type": "application/json"
           },
           timeout: 15000
         }),
-      Number(process.env.WHATSAPP_RETRY_ATTEMPTS || 3),
-      Number(process.env.WHATSAPP_RETRY_DELAY_MS || 1500)
+      Number(clientConfig.whatsapp.retryAttempts || 3),
+      Number(clientConfig.whatsapp.retryDelayMs || 1500)
     );
 
     return {
@@ -112,16 +111,18 @@ function wait(ms) {
   });
 }
 
-function validateWhatsAppConfig() {
-  const required = [
-    "WA_PHONE_NUMBER_ID",
-    "WA_ACCESS_TOKEN",
-    "WA_TEMPLATE_NAME",
-    "GROUP_INVITE_LINK",
-    "BUSINESS_OFFER_NAME"
-  ];
+function validateWhatsAppConfig(clientConfig) {
+  const checks = {
+    WA_PHONE_NUMBER_ID: clientConfig?.whatsapp?.phoneNumberId,
+    WA_ACCESS_TOKEN: clientConfig?.whatsapp?.accessToken,
+    WA_TEMPLATE_NAME: clientConfig?.whatsapp?.templateName,
+    GROUP_INVITE_LINK: clientConfig?.whatsapp?.groupInviteLink,
+    BUSINESS_OFFER_NAME: clientConfig?.whatsapp?.businessOfferName
+  };
 
-  const missing = required.filter((key) => !process.env[key]);
+  const missing = Object.entries(checks)
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
   if (missing.length) {
     throw new Error(
       `Missing WhatsApp configuration: ${missing.join(", ")}`

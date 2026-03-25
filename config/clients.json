@@ -1,0 +1,36 @@
+{
+  "clients": [
+    {
+      "slug": "demo-client",
+      "name": "Demo Client",
+      "status": "active",
+      "defaultCountry": "US",
+      "requireExplicitConsent": true,
+      "consentFieldKeys": ["consent", "whatsapp_opt_in"],
+      "consentTrueValues": ["true", "yes", "checked", "1"],
+      "phoneFieldKeys": ["phone", "phone_number", "mobile_phone"],
+      "firstNameFieldKeys": ["first_name", "full_name", "name"],
+      "impliedConsentFormNames": [],
+      "googleSheets": {
+        "enabled": false
+      },
+      "meta": {
+        "verifyTokenEnv": "ACME_FB_VERIFY_TOKEN",
+        "appSecretEnv": "ACME_FB_APP_SECRET",
+        "accessTokenEnv": "ACME_FB_ACCESS_TOKEN",
+        "graphApiVersion": "v22.0"
+      },
+      "whatsapp": {
+        "phoneNumberIdEnv": "ACME_WA_PHONE_NUMBER_ID",
+        "accessTokenEnv": "ACME_WA_ACCESS_TOKEN",
+        "apiVersion": "v22.0",
+        "templateNameEnv": "ACME_WA_TEMPLATE_NAME",
+        "templateLanguageCodeEnv": "ACME_WA_TEMPLATE_LANGUAGE_CODE",
+        "groupInviteLinkEnv": "ACME_GROUP_INVITE_LINK",
+        "businessOfferNameEnv": "ACME_BUSINESS_OFFER_NAME",
+        "retryAttempts": 3,
+        "retryDelayMs": 1500
+      }
+    }
+  ]
+}

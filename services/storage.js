@@ -49,14 +49,28 @@ function findLeadById(leadId) {
   return db.leads.find((lead) => lead.id === leadId) || null;
 }
 
-async function appendLeadEvent(leadId, status, details = {}) {
+function findLeadByExternalId(clientSlug, externalLeadId) {
+  initializeStorage();
+  const db = readDatabase();
+  return (
+    db.leads.find(
+      (lead) =>
+        lead.clientSlug === clientSlug && lead.externalLeadId === externalLeadId
+    ) || null
+  );
+}
+
+async function appendLeadEvent(leadId, status, details = {}, options = {}) {
   initializeStorage();
   const db = readDatabase();
   const event = {
     id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     leadId: leadId || null,
+    clientSlug: options.clientSlug || null,
+    clientName: options.clientName || null,
     status,
     details,
+    googleSheets: options.googleSheets || {},
     createdAt: new Date().toISOString()
   };
 
@@ -93,6 +107,39 @@ async function updateLeadByWhatsAppMessageId(messageId, updates = {}) {
   return nextRecord;
 }
 
+function listLeadsByClient(clientSlug) {
+  initializeStorage();
+  const db = readDatabase();
+  return db.leads.filter((lead) => lead.clientSlug === clientSlug);
+}
+
+function listEventsByClient(clientSlug) {
+  initializeStorage();
+  const db = readDatabase();
+  return db.events.filter((event) => event.clientSlug === clientSlug);
+}
+
+function getLeadSummary(clientSlug) {
+  const leads = listLeadsByClient(clientSlug);
+  const summary = {
+    received: 0,
+    no_consent: 0,
+    invalid_phone: 0,
+    message_sent: 0,
+    delivered: 0,
+    read: 0,
+    message_failed: 0
+  };
+
+  for (const lead of leads) {
+    if (summary[lead.status] !== undefined) {
+      summary[lead.status] += 1;
+    }
+  }
+
+  return summary;
+}
+
 function readDatabase() {
   const raw = fs.readFileSync(defaultLeadsPath, "utf8");
   return JSON.parse(raw);
@@ -103,15 +150,15 @@ function writeDatabase(data) {
 }
 
 async function appendGoogleSheetsRow(record, recordType) {
-  if (`${process.env.ENABLE_GOOGLE_SHEETS_LOGGING}` !== "true") {
+  const googleSheetsConfig = record.googleSheets || {};
+  if (googleSheetsConfig.enabled !== true) {
     return;
   }
 
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const worksheetName =
-    process.env.GOOGLE_SHEETS_WORKSHEET_NAME || "LeadLog";
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const privateKey = (process.env.GOOGLE_PRIVATE_KEY || "").replace(
+  const spreadsheetId = googleSheetsConfig.spreadsheetId;
+  const worksheetName = googleSheetsConfig.worksheetName || "LeadLog";
+  const clientEmail = googleSheetsConfig.serviceAccountEmail;
+  const privateKey = (googleSheetsConfig.privateKey || "").replace(
     /\\n/g,
     "\n"
   );
@@ -137,6 +184,7 @@ async function appendGoogleSheetsRow(record, recordType) {
       record.id || "",
       record.leadId || "",
       record.status || "",
+      record.clientSlug || "",
       record.externalLeadId || "",
       record.phoneNumberNormalized || "",
       record.whatsappMessageId || "",
@@ -147,7 +195,7 @@ async function appendGoogleSheetsRow(record, recordType) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${worksheetName}!A:J`,
+    range: `${worksheetName}!A:K`,
     valueInputOption: "RAW",
     requestBody: {
       values
@@ -158,7 +206,11 @@ async function appendGoogleSheetsRow(record, recordType) {
 module.exports = {
   initializeStorage,
   findLeadById,
+  findLeadByExternalId,
   saveLeadRecord,
   appendLeadEvent,
-  updateLeadByWhatsAppMessageId
+  updateLeadByWhatsAppMessageId,
+  listLeadsByClient,
+  listEventsByClient,
+  getLeadSummary
 };
