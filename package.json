@@ -1,0 +1,29 @@
+{
+  "name": "facebook-leads-to-whatsapp-group-invite",
+  "version": "1.0.0",
+  "description": "Production-aware Node.js starter for Facebook Lead Ads to WhatsApp Cloud API template messaging with consent checks and lead tracking.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "facebook-lead-ads",
+    "whatsapp-cloud-api",
+    "webhook",
+    "express",
+    "automation"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^149.0.0",
+    "libphonenumber-js": "^1.11.18",
+    "morgan": "^1.10.0"
+  }
+}
