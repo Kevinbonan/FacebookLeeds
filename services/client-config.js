@@ -5,18 +5,24 @@ const clientConfigPath = process.env.CLIENT_CONFIG_PATH || "./config/clients.jso
 
 function getAllClients() {
   const config = readClientConfig();
-  return config.clients || [];
+  const clients = config.clients || [];
+
+  if (clients.length) {
+    return clients.map(hydrateClientConfig);
+  }
+
+  const defaultClient = buildDefaultClientConfig();
+  return defaultClient ? [defaultClient] : [];
 }
 
 function getClientConfig(clientSlug) {
-  const config = readClientConfig();
-  const client = (config.clients || []).find((item) => item.slug === clientSlug);
+  const clients = getAllClients();
 
-  if (!client) {
-    return null;
+  if (!clientSlug && clients.length === 1) {
+    return clients[0];
   }
 
-  return hydrateClientConfig(client);
+  return clients.find((item) => item.slug === clientSlug) || null;
 }
 
 function getClientConfigForVerifyToken(token) {
@@ -24,9 +30,7 @@ function getClientConfigForVerifyToken(token) {
     return null;
   }
 
-  return getAllClients()
-    .map(hydrateClientConfig)
-    .find((client) => client.meta.verifyToken === token) || null;
+  return getAllClients().find((client) => client.meta.verifyToken === token) || null;
 }
 
 function hydrateClientConfig(client) {
@@ -37,13 +41,24 @@ function hydrateClientConfig(client) {
       typeof client.requireExplicitConsent === "boolean"
         ? client.requireExplicitConsent
         : `${process.env.REQUIRE_EXPLICIT_CONSENT}` !== "false",
-    consentFieldKeys: client.consentFieldKeys || splitCsv(process.env.CONSENT_FIELD_KEYS),
-    consentTrueValues: client.consentTrueValues || splitCsv(process.env.CONSENT_TRUE_VALUES),
-    phoneFieldKeys: client.phoneFieldKeys || splitCsv(process.env.PHONE_FIELD_KEYS),
+    consentFieldKeys: normalizeList(
+      client.consentFieldKeys || splitCsv(process.env.CONSENT_FIELD_KEYS)
+    ),
+    consentTrueValues: normalizeList(
+      client.consentTrueValues || splitCsv(process.env.CONSENT_TRUE_VALUES)
+    ),
+    phoneFieldKeys: normalizeList(
+      client.phoneFieldKeys || splitCsv(process.env.PHONE_FIELD_KEYS)
+    ),
     firstNameFieldKeys:
-      client.firstNameFieldKeys || splitCsv(process.env.FIRST_NAME_FIELD_KEYS),
+      normalizeList(
+        client.firstNameFieldKeys || splitCsv(process.env.FIRST_NAME_FIELD_KEYS)
+      ),
     impliedConsentFormNames:
-      client.impliedConsentFormNames || splitCsv(process.env.META_FORM_NAMES_WITH_IMPLIED_CONSENT),
+      normalizeList(
+        client.impliedConsentFormNames ||
+          splitCsv(process.env.META_FORM_NAMES_WITH_IMPLIED_CONSENT)
+      ),
     meta: {
       verifyToken: readEnvReference(client.meta?.verifyTokenEnv, process.env.FB_VERIFY_TOKEN),
       appSecret: readEnvReference(client.meta?.appSecretEnv, process.env.FB_APP_SECRET),
@@ -105,6 +120,24 @@ function hydrateClientConfig(client) {
   };
 }
 
+function buildDefaultClientConfig() {
+  const hasDefaultSecrets =
+    process.env.FB_VERIFY_TOKEN ||
+    process.env.FB_ACCESS_TOKEN ||
+    process.env.WA_ACCESS_TOKEN ||
+    process.env.WA_PHONE_NUMBER_ID;
+
+  if (!hasDefaultSecrets) {
+    return null;
+  }
+
+  return hydrateClientConfig({
+    slug: "default",
+    name: process.env.SERVICE_BRAND_NAME || "Default Client",
+    status: "active"
+  });
+}
+
 function readClientConfig() {
   const resolvedPath = path.resolve(clientConfigPath);
 
@@ -128,6 +161,10 @@ function splitCsv(value = "") {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizeList(items = []) {
+  return items.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
 }
 
 module.exports = {

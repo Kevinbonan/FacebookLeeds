@@ -24,8 +24,12 @@ function verifyFacebookWebhook(query, verifyToken) {
 function validateFacebookSignature(req, appSecret) {
   const signatureHeader = req.get("x-hub-signature-256");
 
-  if (!appSecret || !signatureHeader) {
+  if (!appSecret) {
     return true;
+  }
+
+  if (!signatureHeader) {
+    return false;
   }
 
   const expectedSignature = `sha256=${crypto

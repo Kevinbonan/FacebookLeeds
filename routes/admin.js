@@ -40,7 +40,9 @@ router.get("/", (_req, res) => {
   initializeStorage();
   const brandName = process.env.SERVICE_BRAND_NAME || "LeadFlow Ops";
   const clients = getAllClients().map((client) => ({
-    ...client,
+    slug: client.slug,
+    name: client.name,
+    status: client.status,
     summary: getLeadSummary(client.slug)
   }));
 
@@ -50,7 +52,10 @@ router.get("/", (_req, res) => {
 router.get("/api/clients", (_req, res) => {
   initializeStorage();
   const clients = getAllClients().map((client) => ({
-    ...client,
+    slug: client.slug,
+    name: client.name,
+    status: client.status,
+    defaultCountry: client.defaultCountry,
     summary: getLeadSummary(client.slug)
   }));
 
@@ -79,8 +84,14 @@ router.get("/api/clients/:clientSlug", (req, res) => {
       status: client.status,
       defaultCountry: client.defaultCountry,
       summary: getLeadSummary(client.slug),
-      recentLeads: listLeadsByClient(client.slug).slice(-20).reverse(),
-      recentEvents: listEventsByClient(client.slug).slice(-20).reverse()
+      recentLeads: listLeadsByClient(client.slug)
+        .slice(-20)
+        .reverse()
+        .map(stripSecrets),
+      recentEvents: listEventsByClient(client.slug)
+        .slice(-20)
+        .reverse()
+        .map(stripSecrets)
     }
   });
 });
@@ -141,4 +152,10 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function stripSecrets(record) {
+  const nextRecord = { ...record };
+  delete nextRecord.googleSheets;
+  return nextRecord;
 }

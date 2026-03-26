@@ -9,7 +9,11 @@ const {
 } = require("../services/facebook");
 const { normalizePhone } = require("../services/phone");
 const { sendTemplateMessage } = require("../services/whatsapp");
-const { getClientConfig, getClientConfigForVerifyToken } = require("../services/client-config");
+const {
+  getAllClients,
+  getClientConfig,
+  getClientConfigForVerifyToken
+} = require("../services/client-config");
 const {
   initializeStorage,
   findLeadByExternalId,
@@ -17,6 +21,7 @@ const {
   appendLeadEvent,
   updateLeadByWhatsAppMessageId
 } = require("../services/storage");
+const { acquireLock, releaseLock } = require("../services/processing-locks");
 
 const router = express.Router();
 
@@ -38,8 +43,12 @@ router.post(
 router.get("/whatsapp", handleWhatsAppVerificationByToken);
 router.get("/:clientSlug/whatsapp", handleWhatsAppVerificationBySlug);
 
-router.post("/whatsapp", express.json(), handleWhatsAppWebhook);
-router.post("/:clientSlug/whatsapp", express.json(), handleWhatsAppWebhook);
+router.post("/whatsapp", express.raw({ type: "application/json" }), handleWhatsAppWebhook);
+router.post(
+  "/:clientSlug/whatsapp",
+  express.raw({ type: "application/json" }),
+  handleWhatsAppWebhook
+);
 
 module.exports = router;
 
@@ -67,13 +76,14 @@ function handleFacebookVerificationBySlug(req, res) {
 
 async function handleFacebookWebhookByToken(req, res) {
   const token = req.query.client || req.get("x-client-slug");
-  const clientConfig = token ? getClientConfig(token) : null;
+  const clientConfig = token ? getClientConfig(token) : getSingleConfiguredClient();
 
   if (!clientConfig) {
     return res.status(400).json({
       ok: false,
       error: "client_slug_required",
-      detail: "Pass x-client-slug header, ?client=slug, or use /webhooks/:clientSlug/facebook"
+      detail:
+        "Pass x-client-slug header, ?client=slug, use /webhooks/:clientSlug/facebook, or configure only one client"
     });
   }
 
@@ -114,7 +124,25 @@ function handleWhatsAppVerificationBySlug(req, res) {
 async function handleWhatsAppWebhook(req, res) {
   try {
     initializeStorage();
-    const payload = req.body || {};
+    const clientConfig = resolveWebhookClient(req);
+
+    if (!clientConfig) {
+      return res.status(400).json({
+        ok: false,
+        error: "client_slug_required",
+        detail:
+          "Pass x-client-slug header, ?client=slug, use /webhooks/:clientSlug/whatsapp, or configure only one client"
+      });
+    }
+
+    if (!validateFacebookSignature(req, clientConfig.meta.appSecret)) {
+      return res.status(403).json({
+        ok: false,
+        error: "invalid_signature"
+      });
+    }
+
+    const payload = JSON.parse(req.body.toString("utf8"));
     let processed = 0;
 
     for (const entry of payload.entry || []) {
@@ -146,8 +174,7 @@ async function handleWhatsAppWebhook(req, res) {
             },
             {
               clientSlug: updatedLead?.clientSlug || null,
-              clientName: updatedLead?.clientName || null,
-              googleSheets: updatedLead?.googleSheets || {}
+              clientName: updatedLead?.clientName || null
             }
           );
         }
@@ -205,168 +232,176 @@ async function processFacebookWebhook(req, res, clientConfig) {
     const results = [];
 
     for (const event of leadEvents) {
-      const rawLead = await fetchLeadDetails(event, clientConfig);
-      const parsedLead = parseLeadRecord(rawLead, event, clientConfig);
-      const normalizedPhone = normalizePhone(
-        parsedLead.phoneNumber,
-        clientConfig.defaultCountry
-      );
-
-      let leadRecord = buildLeadTrackingRecord(parsedLead, event, {
-        clientSlug: clientConfig.slug,
-        clientName: clientConfig.name,
-        normalizedPhone: normalizedPhone.e164,
-        phoneValidation: normalizedPhone,
-        status: "received"
-      });
-      leadRecord.id = `${clientConfig.slug}:${leadRecord.externalLeadId || Date.now()}`;
-      leadRecord.googleSheets = clientConfig.googleSheets;
-
-      const existingLead = findLeadByExternalId(
-        clientConfig.slug,
-        leadRecord.externalLeadId
-      );
-
-      if (
-        existingLead &&
-        ["message_sent", "delivered", "read"].includes(existingLead.status)
-      ) {
-        await appendLeadEvent(
-          existingLead.id,
-          "duplicate_received",
-          { note: "Duplicate Facebook lead webhook skipped" },
-          {
-            clientSlug: existingLead.clientSlug,
-            clientName: existingLead.clientName,
-            googleSheets: existingLead.googleSheets || clientConfig.googleSheets
-          }
-        );
-
+      const lockKey = `${clientConfig.slug}:${event.leadgenId || event.formId || Date.now()}`;
+      if (!acquireLock(lockKey)) {
         results.push({
-          leadId: existingLead.id,
-          status: existingLead.status
+          leadId: `${clientConfig.slug}:${event.leadgenId || "unknown"}`,
+          status: "duplicate_received"
         });
         continue;
       }
 
-      leadRecord = await saveLeadRecord(leadRecord);
-      await appendLeadEvent(
-        leadRecord.id,
-        "received",
-        { note: "Lead webhook received and parsed" },
-        {
-          clientSlug: leadRecord.clientSlug,
-          clientName: leadRecord.clientName,
-          googleSheets: leadRecord.googleSheets
-        }
-      );
+      try {
+        const rawLead = await fetchLeadDetails(event, clientConfig);
+        const parsedLead = parseLeadRecord(rawLead, event, clientConfig);
+        const normalizedPhone = normalizePhone(
+          parsedLead.phoneNumber,
+          clientConfig.defaultCountry
+        );
 
-      if (!parsedLead.hasConsent) {
-        leadRecord = await saveLeadRecord({
-          ...leadRecord,
-          status: "no_consent",
-          failureReason: "Consent missing or false"
+        let leadRecord = buildLeadTrackingRecord(parsedLead, event, {
+          clientSlug: clientConfig.slug,
+          clientName: clientConfig.name,
+          normalizedPhone: normalizedPhone.e164,
+          phoneValidation: normalizedPhone,
+          status: "received"
         });
+        leadRecord.id = `${clientConfig.slug}:${leadRecord.externalLeadId || Date.now()}`;
 
+        const existingLead = findLeadByExternalId(
+          clientConfig.slug,
+          leadRecord.externalLeadId
+        );
+
+        if (
+          existingLead &&
+          ["message_sent", "delivered", "read", "no_consent", "invalid_phone"].includes(
+            existingLead.status
+          )
+        ) {
+          await appendLeadEvent(
+            existingLead.id,
+            "duplicate_received",
+            { note: "Duplicate Facebook lead webhook skipped" },
+            {
+              clientSlug: existingLead.clientSlug,
+              clientName: existingLead.clientName
+            }
+          );
+
+          results.push({
+            leadId: existingLead.id,
+            status: existingLead.status
+          });
+          continue;
+        }
+
+        leadRecord = await saveLeadRecord(leadRecord);
         await appendLeadEvent(
           leadRecord.id,
-          "no_consent",
-          { note: "WhatsApp message blocked by consent policy" },
+          "received",
+          { note: "Lead webhook received and parsed" },
           {
             clientSlug: leadRecord.clientSlug,
-            clientName: leadRecord.clientName,
-            googleSheets: leadRecord.googleSheets
+            clientName: leadRecord.clientName
           }
         );
+
+        if (!parsedLead.hasConsent) {
+          leadRecord = await saveLeadRecord({
+            ...leadRecord,
+            status: "no_consent",
+            failureReason: "Consent missing or false"
+          });
+
+          await appendLeadEvent(
+            leadRecord.id,
+            "no_consent",
+            { note: "WhatsApp message blocked by consent policy" },
+            {
+              clientSlug: leadRecord.clientSlug,
+              clientName: leadRecord.clientName
+            }
+          );
+
+          results.push({
+            leadId: leadRecord.id,
+            status: leadRecord.status
+          });
+          continue;
+        }
+
+        if (!normalizedPhone.isValid) {
+          leadRecord = await saveLeadRecord({
+            ...leadRecord,
+            status: "invalid_phone",
+            failureReason: normalizedPhone.reason
+          });
+
+          await appendLeadEvent(
+            leadRecord.id,
+            "invalid_phone",
+            { note: normalizedPhone.reason },
+            {
+              clientSlug: leadRecord.clientSlug,
+              clientName: leadRecord.clientName
+            }
+          );
+
+          results.push({
+            leadId: leadRecord.id,
+            status: leadRecord.status
+          });
+          continue;
+        }
+
+        const sendResult = await sendTemplateMessage({
+          to: normalizedPhone.e164,
+          firstName: parsedLead.firstName,
+          groupInviteLink: clientConfig.whatsapp.groupInviteLink,
+          offerName: clientConfig.whatsapp.businessOfferName,
+          clientConfig,
+          metadata: {
+            leadRecordId: leadRecord.id,
+            campaignName: parsedLead.campaignName,
+            formName: parsedLead.formName,
+            clientSlug: clientConfig.slug
+          }
+        });
+
+        if (sendResult.ok) {
+          leadRecord = await saveLeadRecord({
+            ...leadRecord,
+            status: "message_sent",
+            whatsappMessageId: sendResult.messageId,
+            sentAt: new Date().toISOString(),
+            failureReason: null
+          });
+
+          await appendLeadEvent(
+            leadRecord.id,
+            "message_sent",
+            { messageId: sendResult.messageId },
+            {
+              clientSlug: leadRecord.clientSlug,
+              clientName: leadRecord.clientName
+            }
+          );
+        } else {
+          leadRecord = await saveLeadRecord({
+            ...leadRecord,
+            status: "message_failed",
+            failureReason: sendResult.error
+          });
+
+          await appendLeadEvent(
+            leadRecord.id,
+            "message_failed",
+            { note: sendResult.error },
+            {
+              clientSlug: leadRecord.clientSlug,
+              clientName: leadRecord.clientName
+            }
+          );
+        }
 
         results.push({
           leadId: leadRecord.id,
           status: leadRecord.status
         });
-        continue;
+      } finally {
+        releaseLock(lockKey);
       }
-
-      if (!normalizedPhone.isValid) {
-        leadRecord = await saveLeadRecord({
-          ...leadRecord,
-          status: "invalid_phone",
-          failureReason: normalizedPhone.reason
-        });
-
-        await appendLeadEvent(
-          leadRecord.id,
-          "invalid_phone",
-          { note: normalizedPhone.reason },
-          {
-            clientSlug: leadRecord.clientSlug,
-            clientName: leadRecord.clientName,
-            googleSheets: leadRecord.googleSheets
-          }
-        );
-
-        results.push({
-          leadId: leadRecord.id,
-          status: leadRecord.status
-        });
-        continue;
-      }
-
-      const sendResult = await sendTemplateMessage({
-        to: normalizedPhone.e164,
-        firstName: parsedLead.firstName,
-        groupInviteLink: clientConfig.whatsapp.groupInviteLink,
-        offerName: clientConfig.whatsapp.businessOfferName,
-        clientConfig,
-        metadata: {
-          leadRecordId: leadRecord.id,
-          campaignName: parsedLead.campaignName,
-          formName: parsedLead.formName,
-          clientSlug: clientConfig.slug
-        }
-      });
-
-      if (sendResult.ok) {
-        leadRecord = await saveLeadRecord({
-          ...leadRecord,
-          status: "message_sent",
-          whatsappMessageId: sendResult.messageId,
-          sentAt: new Date().toISOString(),
-          failureReason: null
-        });
-
-        await appendLeadEvent(
-          leadRecord.id,
-          "message_sent",
-          { messageId: sendResult.messageId },
-          {
-            clientSlug: leadRecord.clientSlug,
-            clientName: leadRecord.clientName,
-            googleSheets: leadRecord.googleSheets
-          }
-        );
-      } else {
-        leadRecord = await saveLeadRecord({
-          ...leadRecord,
-          status: "message_failed",
-          failureReason: sendResult.error
-        });
-
-        await appendLeadEvent(
-          leadRecord.id,
-          "message_failed",
-          { note: sendResult.error },
-          {
-            clientSlug: leadRecord.clientSlug,
-            clientName: leadRecord.clientName,
-            googleSheets: leadRecord.googleSheets
-          }
-        );
-      }
-
-      results.push({
-        leadId: leadRecord.id,
-        status: leadRecord.status
-      });
     }
 
     return res.status(200).json({
@@ -397,6 +432,40 @@ function getClientOr404(clientSlug, res) {
   }
 
   return clientConfig;
+}
+
+function getSingleConfiguredClient() {
+  const clients = getAllClients();
+  return clients.length === 1 ? clients[0] : null;
+}
+
+function resolveWebhookClient(req) {
+  if (req.params.clientSlug) {
+    return getClientConfig(req.params.clientSlug);
+  }
+
+  const explicitClient = req.query.client || req.get("x-client-slug");
+  if (explicitClient) {
+    return getClientConfig(explicitClient);
+  }
+
+  const singleClient = getSingleConfiguredClient();
+  if (singleClient) {
+    return singleClient;
+  }
+
+  const signatureHeader = req.get("x-hub-signature-256");
+  if (!signatureHeader) {
+    return null;
+  }
+
+  return (
+    getAllClients().find(
+      (client) =>
+        client.meta.appSecret &&
+        validateFacebookSignature(req, client.meta.appSecret)
+    ) || null
+  );
 }
 
 function mapWhatsappStatus(status) {

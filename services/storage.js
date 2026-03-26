@@ -1,8 +1,10 @@
 const fs = require("fs");
 const path = require("path");
 const { google } = require("googleapis");
+const { getClientConfig } = require("./client-config");
 
 const defaultLeadsPath = process.env.LEADS_FILE_PATH || "./data/leads.json";
+let writeQueue = Promise.resolve();
 
 function initializeStorage() {
   const directory = path.dirname(defaultLeadsPath);
@@ -22,24 +24,29 @@ function initializeStorage() {
 
 async function saveLeadRecord(record) {
   initializeStorage();
-  const db = readDatabase();
-  const existingIndex = db.leads.findIndex((lead) => lead.id === record.id);
-  const nextRecord = {
-    ...record,
-    updatedAt: new Date().toISOString()
-  };
-
-  if (existingIndex >= 0) {
-    db.leads[existingIndex] = {
-      ...db.leads[existingIndex],
-      ...nextRecord
+  const nextRecord = await withWriteLock(() => {
+    const db = readDatabase();
+    const existingIndex = db.leads.findIndex((lead) => lead.id === record.id);
+    const sanitizedRecord = sanitizeStoredRecord(record);
+    const recordToStore = {
+      ...sanitizedRecord,
+      updatedAt: new Date().toISOString()
     };
-  } else {
-    db.leads.push(nextRecord);
-  }
 
-  writeDatabase(db);
-  await appendGoogleSheetsRow(nextRecord, "lead_record");
+    if (existingIndex >= 0) {
+      db.leads[existingIndex] = {
+        ...db.leads[existingIndex],
+        ...recordToStore
+      };
+    } else {
+      db.leads.push(recordToStore);
+    }
+
+    writeDatabase(db);
+    return existingIndex >= 0 ? db.leads[existingIndex] : recordToStore;
+  });
+
+  await appendGoogleSheetsRowSafe(nextRecord, "lead_record");
   return nextRecord;
 }
 
@@ -62,21 +69,24 @@ function findLeadByExternalId(clientSlug, externalLeadId) {
 
 async function appendLeadEvent(leadId, status, details = {}, options = {}) {
   initializeStorage();
-  const db = readDatabase();
-  const event = {
-    id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    leadId: leadId || null,
-    clientSlug: options.clientSlug || null,
-    clientName: options.clientName || null,
-    status,
-    details,
-    googleSheets: options.googleSheets || {},
-    createdAt: new Date().toISOString()
-  };
+  const event = await withWriteLock(() => {
+    const db = readDatabase();
+    const nextEvent = {
+      id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      leadId: leadId || null,
+      clientSlug: options.clientSlug || null,
+      clientName: options.clientName || null,
+      status,
+      details,
+      createdAt: new Date().toISOString()
+    };
 
-  db.events.push(event);
-  writeDatabase(db);
-  await appendGoogleSheetsRow(event, "lead_event");
+    db.events.push(nextEvent);
+    writeDatabase(db);
+    return nextEvent;
+  });
+
+  await appendGoogleSheetsRowSafe(event, "lead_event");
   return event;
 }
 
@@ -86,24 +96,28 @@ async function updateLeadByWhatsAppMessageId(messageId, updates = {}) {
   }
 
   initializeStorage();
-  const db = readDatabase();
-  const existingIndex = db.leads.findIndex(
-    (lead) => lead.whatsappMessageId === messageId
-  );
+  const nextRecord = await withWriteLock(() => {
+    const db = readDatabase();
+    const existingIndex = db.leads.findIndex(
+      (lead) => lead.whatsappMessageId === messageId
+    );
 
-  if (existingIndex < 0) {
-    return null;
-  }
+    if (existingIndex < 0) {
+      return null;
+    }
 
-  const nextRecord = {
-    ...db.leads[existingIndex],
-    ...updates,
-    updatedAt: new Date().toISOString()
-  };
+    const recordToStore = {
+      ...db.leads[existingIndex],
+      ...sanitizeStoredRecord(updates),
+      updatedAt: new Date().toISOString()
+    };
 
-  db.leads[existingIndex] = nextRecord;
-  writeDatabase(db);
-  await appendGoogleSheetsRow(nextRecord, "lead_record");
+    db.leads[existingIndex] = recordToStore;
+    writeDatabase(db);
+    return recordToStore;
+  });
+
+  await appendGoogleSheetsRowSafe(nextRecord, "lead_record");
   return nextRecord;
 }
 
@@ -150,7 +164,7 @@ function writeDatabase(data) {
 }
 
 async function appendGoogleSheetsRow(record, recordType) {
-  const googleSheetsConfig = record.googleSheets || {};
+  const googleSheetsConfig = resolveGoogleSheetsConfig(record);
   if (googleSheetsConfig.enabled !== true) {
     return;
   }
@@ -201,6 +215,40 @@ async function appendGoogleSheetsRow(record, recordType) {
       values
     }
   });
+}
+
+async function appendGoogleSheetsRowSafe(record, recordType) {
+  if (!record) {
+    return;
+  }
+
+  try {
+    await appendGoogleSheetsRow(record, recordType);
+  } catch (error) {
+    console.error("Google Sheets logging failed:", error.message);
+  }
+}
+
+function resolveGoogleSheetsConfig(record) {
+  const clientSlug = record?.clientSlug;
+  if (!clientSlug) {
+    return { enabled: false };
+  }
+
+  const clientConfig = getClientConfig(clientSlug);
+  return clientConfig?.googleSheets || { enabled: false };
+}
+
+function sanitizeStoredRecord(record = {}) {
+  const nextRecord = { ...record };
+  delete nextRecord.googleSheets;
+  return nextRecord;
+}
+
+function withWriteLock(callback) {
+  const run = async () => callback();
+  writeQueue = writeQueue.then(run, run);
+  return writeQueue;
 }
 
 module.exports = {
